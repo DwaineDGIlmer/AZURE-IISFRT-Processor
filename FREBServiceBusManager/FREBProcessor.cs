@@ -48,7 +48,6 @@ namespace FREBProcessor
     // Event args for the event handlers
     sealed public class EventHubDataArgs : EventArgs
     {
-        public static readonly EventHubDataArgs Empty;
         public bool IsEmpty { get { return (HubEventData == null || HubEventData.Count() == 0); } }
         public IEnumerable<EventHubData> HubEventData { get; set; }
 
@@ -59,7 +58,6 @@ namespace FREBProcessor
     }
     sealed public class FRTEventArg : EventArgs
     {
-        public static readonly FRTEventArg Empty;
         public bool IsEmpty { get { return (Data == null || Data.Count() == 0); } }
         public Dictionary<string, string> Data { get; set; }
 
@@ -76,7 +74,7 @@ namespace FREBProcessor
         // JSON can handle these data types
         // I found that these members have to be accessible when the event is deserialized
         // or they will not be populated
-        public string PartionKey { get; set; }
+        public string PartitionKey { get; set; }
         public string RowKey { get; set; }
 
         public string Owner { get; set; }
@@ -94,7 +92,7 @@ namespace FREBProcessor
     {
         #region Private
         private static long _rowKey;
-        private static string _partionReference;
+        private static string _partitionReference;
         private static string _providername;
         private static string _ownername;
         private static Guid _providerId;
@@ -112,7 +110,7 @@ namespace FREBProcessor
             _ownername = "FREBProcessing";
             _providerId = new Guid("ed544058-2bf2-42b4-b9a0-fd2782fe44ae");
             _providername = Path.GetFileName(System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName);
-            _partionReference = string.Format("{0}_{1}", Environment.MachineName, _providername);
+            _partitionReference = string.Format("{0}_{1}", Environment.MachineName, _providername);
         }
         public FREBHubData(string filename, string eventdata, DateTime eventtime, string eventtype = "SystemEvent")
         {
@@ -138,14 +136,14 @@ namespace FREBProcessor
             base.Eventtimestamp = eventtime;
 
             // set the event information
-            base.PartionKey = string.Format("{0}_{1}", eventtype, _partionReference);
+            base.PartitionKey = string.Format("{0}_{1}", eventtype, _partitionReference);
             base.Senttimestamp = DateTime.Now.ToUniversalTime();
             Interlocked.Exchange(ref _rowKey, Senttimestamp.Ticks);
             base.RowKey = _rowKey.ToString();
         }
 
         // Event transformation into event data for this object 
-        public static EventData PrepareData(string name, string stringdata, string eventtype, string partion)
+        public static EventData PrepareData(string name, string stringdata, string eventtype, string partition)
         {
             // If the serialized data is too small return
             if (stringdata.Length < FREBHubData.MinimumFRTLength)
@@ -159,7 +157,7 @@ namespace FREBProcessor
             // Create an  EventData from the Jason object
             EventData data = new EventData(Encoding.UTF8.GetBytes(serializedString))
             {
-                PartitionKey = partion
+                PartitionKey = partition
             };
 
             // If the serialized size is less that our max return
@@ -381,7 +379,9 @@ namespace FREBProcessor
             var epo = new EventProcessorOptions
             {
                 MaxBatchSize = 100,
-                ReceiveTimeOut = TimeSpan.FromSeconds(20),
+                PrefetchCount = 100,
+                ReceiveTimeOut = TimeSpan.FromSeconds(30),
+                InitialOffsetProvider = (partitionId) => DateTime.UtcNow
             };
             epo.ExceptionReceived += DefaultOptions_ExceptionReceived;
 
@@ -559,6 +559,7 @@ namespace FREBProcessor
                 switch (sourceType)
                 {
                     case MonitoringSource.WebApp:
+                    case MonitoringSource.FileSystem:
                         sucess = InitializeFileMonitoring();
                         break;
                     case MonitoringSource.FTP:
@@ -691,7 +692,7 @@ namespace FREBProcessor
             ///////////////////////////////////////////////////////////////
 
             // Only do this once and should never happen more than once
-            if (_FTPMonitor != null)
+            if (_FileMonitor != null)
             {
                 Trace.WriteLine("FRTCollector::InitializeFileMonitoring The File watcher is already configured");
                 return false;
@@ -730,13 +731,6 @@ namespace FREBProcessor
             if (_AzureMonitor != null)
             {
                 Trace.WriteLine("FRTCollector::InitializeAzureMonitoring The Azure storage monitor is already configured");
-                return false;
-            }
-
-            // Check the source
-            if (String.IsNullOrEmpty(SourceName))
-            {
-                Trace.WriteLine("FRTCollector::InitializeAzureMonitoring The source cnotainer name is not configured");
                 return false;
             }
 
@@ -850,7 +844,7 @@ namespace FREBProcessor
         #region Private properties
         private bool _disposed;
         private bool _running;
-        private const int _PollingTime = 20000;
+        private const int _pollingTime = 20000;
         private FileSystemWatcher _fileSystemWatcher;
         private CancellationTokenSource _TokenSource;
         private StringBuilder _stringBuilder;
@@ -859,7 +853,7 @@ namespace FREBProcessor
         #region Public properties
         public string Filter { get; set; }
         public string DirectoryPath { get; set; }
-        public int PollingTime { get { return _PollingTime; } }
+        public int PollingTime { get { return _pollingTime; } }
         #endregion
 
         // Event handler
@@ -1037,7 +1031,7 @@ namespace FREBProcessor
     public class BlobStorageMonitor : ISourceMonitor, IDisposable
     {
         #region Private constants
-        private const int _PollingTime = 20000;
+        private const int _pollingTime = 20000;
         #endregion
 
         #region Private properties
@@ -1051,7 +1045,7 @@ namespace FREBProcessor
 
         #region Public properties
         public string ContainerName;
-        public int PollingTime { get { return _PollingTime; } }
+        public int PollingTime { get { return _pollingTime; } }
         #endregion
 
         // Event handler
@@ -1248,7 +1242,7 @@ namespace FREBProcessor
         {
             _running = true;
             StringBuilder sb = new StringBuilder();
-            while (!_TokenSource.Token.WaitHandle.WaitOne(_PollingTime))
+            while (!_TokenSource.Token.WaitHandle.WaitOne(_pollingTime))
             {
                 List<string> blockRef = UpdateEventsList();
                 if (blockRef.Count > 0)
@@ -1275,7 +1269,7 @@ namespace FREBProcessor
             }
             _running = false;
         }
-        public void UploadFileToBlob(string name, string path)
+        public void UploadData(string name, string path)
         {
             // This was for testing, I left it in the code base for future testing
             try
@@ -1337,7 +1331,7 @@ namespace FREBProcessor
     public class FTPStorageMonitor : ISourceMonitor, IDisposable
     {
         #region Private constant properties
-        private const int _PollingTime = 20000;
+        private const int _pollingTime = 20000;
         #endregion
 
         #region Private properties
@@ -1355,7 +1349,7 @@ namespace FREBProcessor
         #endregion
 
         #region Public properties
-        public int PollingTime { get { return _PollingTime; } }
+        public int PollingTime { get { return _pollingTime; } }
         #endregion
 
         // Event handler
@@ -1451,7 +1445,7 @@ namespace FREBProcessor
             {
                 // This is fatal, it is better to faile early and throw an Exception than to construct an object that is not functional
                 // https://msdn.microsoft.com/en-us/library/aa269568(v=vs.60).aspx
-                Trace.WriteLine("FTPStorageMonitor::FTPStorageMonitor Unable to create WebRequest or WebClient(s)");
+                Trace.WriteLine(string.Format("FTPStorageMonitor::FTPStorageMonitor Unable to create WebRequest or WebClient(s), error: {0}", e.Message));
                 throw;            
             }
 
@@ -1493,7 +1487,7 @@ namespace FREBProcessor
             // Process events
             _running = true;
             StringBuilder sb = new StringBuilder();
-            while (!_TokenSource.Token.WaitHandle.WaitOne(_PollingTime))
+            while (!_TokenSource.Token.WaitHandle.WaitOne(_pollingTime))
             {
                 List<string> files = UpdateEventsList();
                 if (files.Count > 0)
