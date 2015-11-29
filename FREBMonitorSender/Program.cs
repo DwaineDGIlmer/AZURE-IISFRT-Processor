@@ -12,17 +12,17 @@ namespace FREBProcessor
     {
         static void Main(string[] args)
         {
-            Task.Factory.StartNew(() => Sender());
+            //Task.Factory.StartNew(() => Sender());
 
-            FRTReciever newReciever = new FRTReciever(@"c:\temp");
-            newReciever.Start();
-            newReciever.Wait();
+            //FRTReciever newReciever = new FRTReciever(@"C:\Temp");
+            //newReciever.Start();
+            //newReciever.Wait();
         }
 
         private static void Sender()
         {
-            FRTCollector frebCollector = new FRTCollector(FRTCollector.MonitoringSource.AzureBlobStorage, "freblogs");
-            frebCollector.Start();
+            //FRTCollector frebCollector = new FRTCollector(FRTCollector.MonitoringSource.FileSystem, @"C:\Temp\Drop");
+            //frebCollector.Start();
         }
     }
 }

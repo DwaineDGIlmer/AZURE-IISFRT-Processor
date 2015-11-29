@@ -71,6 +71,9 @@ namespace FREBProcessor
     [Serializable]
     public class EventHubData
     {
+        // This is per machine and can possibly have multiple callers
+        private static long _rowKey = 0;
+
         // JSON can handle these data types
         // I found that these members have to be accessible when the event is deserialized
         // or they will not be populated
@@ -87,6 +90,60 @@ namespace FREBProcessor
         public DateTime Senttimestamp { get; set; }
         public Dictionary<string, object> Properties { get; set; }
         public EventHubData() { }
+        public EventHubData(string ownername, string eventprovider, string eventtype, string eventname, string eventData, DateTime eventtime, Guid providerId, string partition, int maxlen, int minlen)
+        {
+            // assign the incoming data
+            Owner = ownername;
+            EventproviderId = providerId;
+            PartitionKey = partition;
+            Eventprovider = eventprovider;
+            Eventtype = eventtype;
+            Eventname = eventname;
+            Eventtimestamp = eventtime;
+            Eventdata = eventData;
+
+            // set the event information
+            Senttimestamp = DateTime.Now.ToUniversalTime();
+            Interlocked.Exchange(ref _rowKey, Senttimestamp.Ticks);
+            RowKey = _rowKey.ToString();
+        }
+
+        // Static methods for the serializtion of Event data 
+        static public EventHubData DeserializeEventData(EventData eventData)
+        {
+            // Create the event data aand serialize the class to a Jason object
+            return JsonConvert.DeserializeObject<EventHubData>(Encoding.UTF8.GetString(eventData.GetBytes()));
+        }
+        static public EventData SerializeEventData(string ownername, string eventprovider, string eventtype, string eventname, string eventData, DateTime eventtime, Guid providerId, string partition, int maxlen, int minlen)
+        {
+            EventHubData newData = new EventHubData(ownername, eventprovider, eventtype, eventname, eventData, eventtime, providerId, partition, maxlen, minlen);
+            return SerializeEventData<EventHubData>(newData, partition, maxlen, minlen);
+        }
+        static public EventData SerializeEventData<T>(T value, string partition, int maxlen, int minlen)
+        {
+            // Create the event data aand serialize the class to a Jason object
+            var serializedString = JsonConvert.SerializeObject(value);
+
+            // Create an  EventData from the Jason object
+            EventData data = new EventData(Encoding.UTF8.GetBytes(serializedString))
+            {
+                PartitionKey = partition
+            };
+
+            // If the serialized data is too small return
+            if (data.SerializedSizeInBytes > minlen &&
+                data.SerializedSizeInBytes <= maxlen)
+            {
+                return data;
+            }
+
+            //  256 Kb per message, use a batch mechanism for the larger message
+            if (data.SerializedSizeInBytes > maxlen)
+            {
+                throw (new NotImplementedException("The event data is too large to be processed, consider batching the event data"));
+            }
+            return null;
+        }
     }
     sealed public class FREBHubData : EventHubData
     {
@@ -101,7 +158,7 @@ namespace FREBProcessor
         // This is the maximum and minimum sizes that we want to handle for a FREB event
         new public static string Owner { get { return _ownername; } }
         public const int MaximumSize = 25000;
-        public const int MinimumFRTLength = 20000;
+        public const int MinimumSize = 20000;
         public const int BlockSize = 100000;
 
         // Constructors
@@ -112,7 +169,7 @@ namespace FREBProcessor
             _providername = Path.GetFileName(System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName);
             _partitionReference = string.Format("{0}_{1}", Environment.MachineName, _providername);
         }
-        public FREBHubData(string filename, string eventdata, DateTime eventtime, string eventtype = "SystemEvent")
+        public FREBHubData(string filename, string eventdata, string eventtype = "SystemEvent")
         {
             if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(eventdata))
             {
@@ -120,20 +177,19 @@ namespace FREBProcessor
                 return;
             }
             base.Eventdata = eventdata;
-            Initialize(filename, eventtime, eventtype);
+            Initialize(filename, eventtype);
         }
-        private void Initialize(string filename, DateTime eventtime, string eventtype = "SystemEvent")
+        private void Initialize(string filename, string eventtype = "SystemEvent")
         {
             // assign the provider info
             base.Eventprovider = _providername;
             base.EventproviderId = _providerId;
 
             // assign the incoming data
-
             base.Owner = _ownername;
             base.Eventtype = eventtype;
             base.Eventname = filename;
-            base.Eventtimestamp = eventtime;
+            base.Eventtimestamp = GetEventTime();
 
             // set the event information
             base.PartitionKey = string.Format("{0}_{1}", eventtype, _partitionReference);
@@ -141,37 +197,40 @@ namespace FREBProcessor
             Interlocked.Exchange(ref _rowKey, Senttimestamp.Ticks);
             base.RowKey = _rowKey.ToString();
         }
+        private DateTime GetEventTime()
+        {
+            if (base.Eventdata != null && base.Eventdata.Length > 1000)
+            {
+                using (StringReader reader = new StringReader(base.Eventdata))
+                { 
+                    string line = string.Empty;
+                    while (!string.IsNullOrEmpty((line = reader.ReadLine())))
+                    {
+                        if (line.Contains("<TimeCreated SystemTime="))
+                        {
+                            // You should improve on this
+                            string[] evtTime = line.Split(new string[] { "<TimeCreated SystemTime=", "/>", " ", "  ","   ","    ","     ","      " }, StringSplitOptions.RemoveEmptyEntries);
+                            if (evtTime != null && evtTime.Length > 0)
+                            {
+                                DateTime ret;
+                                if (DateTime.TryParse(evtTime[0].Trim(new char [] { '\'', '\"'}), out ret))
+                                {
+                                    return ret;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return DateTime.Now;
+        }
 
         // Event transformation into event data for this object 
-        public static EventData PrepareData(string name, string stringdata, string eventtype, string partition)
+        public static EventData SerializeFREBHubData(string name, string stringdata, string eventtype, string partition)
         {
-            // If the serialized data is too small return
-            if (stringdata.Length < FREBHubData.MinimumFRTLength)
-            {
-                return null;
-            }
-
-            // Create the event data aand serialize the class to a Jason object
-            var serializedString = JsonConvert.SerializeObject(new FREBHubData(name, stringdata, DateTime.Now, eventtype));
-
-            // Create an  EventData from the Jason object
-            EventData data = new EventData(Encoding.UTF8.GetBytes(serializedString))
-            {
-                PartitionKey = partition
-            };
-
-            // If the serialized size is less that our max return
-            if (data.SerializedSizeInBytes <= FREBHubData.MaximumSize)
-            {
-                return data;
-            }
-
-            //  256 Kb per message, use a batch mechanism for the larger message
-            if (data.SerializedSizeInBytes > FREBHubData.MaximumSize)
-            {
-                throw(new NotImplementedException("The event data is too large to be processed, consider batching the event data"));
-            }
-            return null;
+            // Create the event data aand serialize the object
+            FREBHubData obj = new FREBHubData(name, stringdata, eventtype);
+            return EventHubData.SerializeEventData(obj, partition, MaximumSize, MinimumSize);
         }
     }        
     
@@ -432,17 +491,6 @@ namespace FREBProcessor
     }
     sealed public class FRTCollector : IDisposable
     {
-        /// <summary>
-        /// This is the object that will collect he FREB files from differnt sources
-        /// then send the formatted data as an Event Data object for consumption in the Azure Event Hub
-        /// <para>
-        /// 1) The user specifies the type of monitoring that will be done
-        /// 2) The object will configure for monitoring that type of FREB source    
-        /// 3) When a FREB log file detected it is passed as a string into this object
-        /// 4) The object will create a FREBHubData object and send it to the Azure Service bus
-        /// </para>
-        /// </summary>
-
         #region Private constants
         private const string _FrebFilter = "fr*.xml";
         private const int _maxEventDataSize = 262000;
@@ -528,15 +576,20 @@ namespace FREBProcessor
 
         #region Constructor
         /// <summary>        
-        /// The constructor code broken out into several calls to different Initialize method for supporting multiple constructors
+        /// The constructor code broken out into several calls to different Initialize method for supporting multiple constructors behavior
         /// <para>
-        /// 1) If it is a file system client then the source is mandatory. Needs to be the file location of the FREB log files  
-        /// 2) If it is a FTP client then the source, user name and password be mandatory  
-        /// 3) If it is an Azure storage client then the source is mandatory. Needs to be the container location of the FREB log files  
-        /// 4) If it is a web application it will attempt to detect it on its own however you can use a Source name for non default web applications
+        /// 1) File system client requires a file location 
+        /// </para>
+        /// <para>
+        /// 2) FTP client requires, user name and password 
+        /// </para>
+        /// <para>
+        /// 3) Azure storage client requires a container 
+        /// </para>
+        /// <para>
+        /// 4) Web client will attempt to detect the FREB location or you can use a Source name for non default web applications
         /// </para>
         /// NOTE: If there is an entry in the app config or web config then it will over write what is set here
-        /// NOTE: If you are using FTP then the username and password are manadory
         /// </summary>
         public FRTCollector(MonitoringSource sourceType, string sourcename = "", string username = "", string password = "")
         {
@@ -642,7 +695,7 @@ namespace FREBProcessor
             {
                 // If the source location is in the app config over wrtie 
                 _sourceName = string.IsNullOrEmpty(ConfigurationManager.AppSettings["Microsoft.IIS.FRTLogfileLocation"]) ? _sourceName : ConfigurationManager.AppSettings["Microsoft.IIS.FRTLogfileLocation"];
-                azurenamespace = ConfigurationManager.AppSettings["Microsoft.ServiceBus.Namespace"];
+                azurenamespace = ConfigurationManager.AppSettings["Microsoft.ServiceBus.ConnectionString"];
                 groupname = ConfigurationManager.AppSettings["Microsoft.EventHub.Sender.ConsumerGroupName"];
                 hubname = ConfigurationManager.AppSettings["Microsoft.EventHub.Sender.Name"];
             }
@@ -751,7 +804,7 @@ namespace FREBProcessor
                         !string.IsNullOrEmpty(e.Data[fileName]))
                     {
                         // Get the data
-                        EventData data = FREBHubData.PrepareData(fileName, e.Data[fileName], FREBHubData.Owner, "0");
+                        EventData data = FREBHubData.SerializeFREBHubData(fileName, e.Data[fileName], FREBHubData.Owner, "0");
                         if (data != null)
                         {
                             Task.Factory.StartNew(() => SendAsync(data));
@@ -927,7 +980,7 @@ namespace FREBProcessor
         #region Initalize method for supporting different constructor calls
         private void Initialize()
         {
-            if (string.IsNullOrEmpty(DirectoryPath) || Directory.Exists(DirectoryPath))
+            if (string.IsNullOrEmpty(DirectoryPath) || !Directory.Exists(DirectoryPath))
             {
                 // This is fatal, it is better to faile early and throw an Exception than to construct an object that is not functional
                 // https://msdn.microsoft.com/en-us/library/aa269568(v=vs.60).aspx
