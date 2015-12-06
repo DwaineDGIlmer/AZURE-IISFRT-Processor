@@ -280,38 +280,23 @@ namespace FREBProcessor
             // NOTE: You will get an AV if these locals are not populated.  You will have to handle this in some way.
             // NOTE: Below is not the Microsoft naming convention for app settings
             ///////////////////////////////////////////////////////////////
-            var azurenamespace = ConfigurationManager.AppSettings["Microsoft.ServiceBus.ConnectionString"];
+            var connectionString = ConfigurationManager.AppSettings["Microsoft.ServiceBus.ConnectionString"];
+            var eventHubConnectionString = ConfigurationManager.AppSettings["Microsoft.EventHub.Reciever.ConnectionString"];
             var groupname = ConfigurationManager.AppSettings["Microsoft.EventHub.Reciever.ConsumerGroupName"];
             var hubname = ConfigurationManager.AppSettings["Microsoft.EventHub.Reciever.Name"];
-            var storageName = ConfigurationManager.AppSettings["Microsoft.StorageAccount.Name"];
-            var storageKey = ConfigurationManager.AppSettings["Microsoft.StorageAccount.Key"];
-            var eventHubConnectionString = ConfigurationManager.AppSettings["Microsoft.EventHub.Reciever.ConnectionString"];
 
             // The NamespaceManager class is used to create Event Hubs
-            var namespacemanager = NamespaceManager.CreateFromConnectionString(azurenamespace);
-
-            // Use the CreateEventHubIfNotExists methods to avoid exceptions
-            var description = namespacemanager.CreateEventHubIfNotExists(hubname);
-
-            // Create the EventHubClient client
-            EventHubClient hubClient = null;
-            if (description.Status == EntityStatus.Active)
-            {                
-                if ((hubClient = EventHubClient.Create(hubname)) == null)
-                {
-                    // Handle in your code
-                    Trace.WriteLine("FRTReciever::FRTReciever construtor failed becasue the application was not able to create a Hub client");
-                    return;
-                }
-            }
-            ///////////////////////////////////////////////////////////////
+            var namespacemanager = NamespaceManager.CreateFromConnectionString(connectionString);
+            var eventHubDescription = namespacemanager.CreateEventHubIfNotExists(hubname);
+            var connectionStringBuilder = new ServiceBusConnectionStringBuilder(connectionString);
+            connectionStringBuilder.EntityPath = eventHubDescription.Path;
 
             // Host processor
-            string storageConnectionString = string.Format("DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1}", storageName, storageKey);
+            string storageConnectionString = string.Format("DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1}", connectionStringBuilder.SharedAccessKeyName, connectionStringBuilder.SharedAccessKey);
             StreamEventProcessor.ProcessEvents += StreamEventProcessor_ProcessEvents;
 
             // Allocate and set up the Event processing host
-            _eventProcessorHost = new EventProcessorHost(Dns.GetHostName(), hubClient.Path, groupname, eventHubConnectionString, storageConnectionString);
+            _eventProcessorHost = new EventProcessorHost(Dns.GetHostName(), eventHubDescription.Path, groupname, eventHubConnectionString, storageConnectionString);
             _eventProcessorHost.PartitionManagerOptions = new PartitionManagerOptions()
             {
                 MaxReceiveClients = 1,
@@ -589,7 +574,7 @@ namespace FREBProcessor
         /// <para>
         /// 4) Web client will attempt to detect the FREB location or you can use a Source name for non default web applications
         /// </para>
-        /// NOTE: If there is an entry in the app config or web config then it will over write what is set here
+        /// NOTE: If there is an entry in the app config or web config then it will not over write what is set in the constructor
         /// </summary>
         public FRTCollector(MonitoringSource sourceType, string sourcename = "", string username = "", string password = "")
         {
@@ -652,7 +637,6 @@ namespace FREBProcessor
             _running = false;
 
             string azurenamespace = string.Empty;
-            string groupname = string.Empty;
             string hubname = string.Empty;
 
             if (SourceType == MonitoringSource.WebApp)
@@ -671,10 +655,7 @@ namespace FREBProcessor
                                 _sourceName = string.IsNullOrEmpty(rootWebConfig.AppSettings.Settings["Microsoft.IIS.FRTLogfileLocation"].Value) ? _sourceName : rootWebConfig.AppSettings.Settings["Microsoft.IIS.FRTLogfileLocation"].Value;
                                 break;
                             case "Microsoft.ServiceBus.Namespace":
-                                azurenamespace = rootWebConfig.AppSettings.Settings["Microsoft.ServiceBus.Namespace"].Value;
-                                break;
-                            case "Microsoft.EventHub.Sender.ConsumerGroupName":
-                                groupname = rootWebConfig.AppSettings.Settings["Microsoft.EventHub.Sender.ConsumerGroupName"].Value;
+                                azurenamespace = rootWebConfig.AppSettings.Settings["Microsoft.EventHub.Sender.Namespace"].Value;
                                 break;
                             case "Microsoft.EventHub.Sender.Name":
                                 hubname = rootWebConfig.AppSettings.Settings["Microsoft.EventHub.Sender.Name"].Value;
@@ -696,7 +677,6 @@ namespace FREBProcessor
                 // If the source location is in the app config over wrtie 
                 _sourceName = string.IsNullOrEmpty(ConfigurationManager.AppSettings["Microsoft.IIS.FRTLogfileLocation"]) ? _sourceName : ConfigurationManager.AppSettings["Microsoft.IIS.FRTLogfileLocation"];
                 azurenamespace = ConfigurationManager.AppSettings["Microsoft.ServiceBus.ConnectionString"];
-                groupname = ConfigurationManager.AppSettings["Microsoft.EventHub.Sender.ConsumerGroupName"];
                 hubname = ConfigurationManager.AppSettings["Microsoft.EventHub.Sender.Name"];
             }
 
@@ -807,7 +787,7 @@ namespace FREBProcessor
                         EventData data = FREBHubData.SerializeFREBHubData(fileName, e.Data[fileName], FREBHubData.Owner, "0");
                         if (data != null)
                         {
-                            Task.Factory.StartNew(() => SendAsync(data));
+                            SendAsync(data);
                         }
                     }
                 }
@@ -876,11 +856,11 @@ namespace FREBProcessor
         #endregion
 
         #region Async task for managing event hub sends
-        private async void SendAsync(EventData data)
+        private void SendAsync(EventData data)
         {
             try
             {
-                await _hubClient.SendAsync(data);
+                _hubClient.SendAsync(data);
             }            
             catch (TimeoutException too)
             {
@@ -1090,6 +1070,7 @@ namespace FREBProcessor
         #region Private properties
         private bool _disposed;
         private bool _running;
+        private string _connection;
         private CloudBlobContainer _blobContainer;
         private CloudBlobClient _blobClient;
         private List<string> _FRTList;
@@ -1160,9 +1141,10 @@ namespace FREBProcessor
         {
             Initialize();
         }
-        public BlobStorageMonitor(string containerRef)
+        public BlobStorageMonitor(string containerRef, string connection = "")
         {
             ContainerName = containerRef;
+            _connection = connection;
             Initialize();
         }
         #endregion
@@ -1170,9 +1152,17 @@ namespace FREBProcessor
         #region Initalize method for supporting different constructor calls
         private void Initialize()
         {
-            // DefaultEndpointsProtocol=https;AccountName=STORAGE_ACCOUNT_NAME;AccountKey=PRIMARY_ACCESS_KEY
-            string connection = ConfigurationManager.AppSettings["AzureWebJobsDashboard"];
-            if (string.IsNullOrEmpty(connection))
+            if (string.IsNullOrEmpty(_connection))
+            {
+                // DefaultEndpointsProtocol=https;AccountName=STORAGE_ACCOUNT_NAME;AccountKey=PRIMARY_ACCESS_KEY
+                _connection = ConfigurationManager.AppSettings["AzureWebJobsDashboard"];
+            }
+            if (string.IsNullOrEmpty(ContainerName))
+            {
+                ContainerName = ConfigurationManager.AppSettings["Microsoft.Storage.Blob.ContainerName"];
+            }
+
+            if (string.IsNullOrEmpty(_connection))
             {
                 // This is fatal, it is better to faile early and throw an Exception than to construct an object that is not functional
                 // https://msdn.microsoft.com/en-us/library/aa269568(v=vs.60).aspx
@@ -1182,7 +1172,7 @@ namespace FREBProcessor
 
             if (string.IsNullOrEmpty(ContainerName))
             {
-                ContainerName = ConfigurationManager.AppSettings["Microsoft.Storage.Blob.ContainerName"];
+
                 if (string.IsNullOrEmpty(ContainerName))
                 {
                     // This is fatal, it is better to faile early and throw an Exception than to construct an object that is not functional
@@ -1196,7 +1186,7 @@ namespace FREBProcessor
             ContainerName = ContainerName.ToLower();
 
             // Create the storage account, container and client objects
-            CloudStorageAccount storageAccount = CloudStorageAccount.Parse(connection);
+            CloudStorageAccount storageAccount = CloudStorageAccount.Parse(_connection);
             _blobClient = storageAccount.CreateCloudBlobClient();
 
             // Set up a retry time
@@ -1467,8 +1457,21 @@ namespace FREBProcessor
         #endregion
 
         #region Constructor
-        public FTPStorageMonitor(string ftpDir, string username, string password)
+        public FTPStorageMonitor(string ftpDir = "", string username = "", string password = "")
         {
+            if (string.IsNullOrEmpty(password))
+            {
+                password = ConfigurationManager.AppSettings["FTPStorageMonitor.FTP.Password"];
+            }
+            if (string.IsNullOrEmpty(username))
+            {
+                username = ConfigurationManager.AppSettings["FTPStorageMonitor.FTP.Username"];
+            }
+            if (string.IsNullOrEmpty(ftpDir))
+            {
+                ftpDir = ConfigurationManager.AppSettings["FTPStorageMonitor.FTP.Directory"];
+            }
+
             // Validate user input
             if (string.IsNullOrEmpty(ftpDir) ||
                string.IsNullOrEmpty(username) ||
@@ -1687,8 +1690,7 @@ namespace FREBProcessor
         #region Method for deserializng the EventData into our EventHubData for further processing
         public  EventHubData DeserializeEventData(EventData eventData)
         {
-            string data = Encoding.UTF8.GetString(eventData.GetBytes());
-            return JsonConvert.DeserializeObject<EventHubData>(data);
+            return EventHubData.DeserializeEventData(eventData);
         }
         #endregion
     }
